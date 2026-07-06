@@ -1,0 +1,2 @@
+# No third-party runtime dependencies.
+# PiP Monitor uses tkinter plus Win32/DWM APIs through ctypes.
