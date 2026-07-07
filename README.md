@@ -3,6 +3,12 @@
 A Windows desktop picture-in-picture monitor for watching multiple running
 application windows from one control panel.
 
+## Version
+
+Current version: `v0.0.2`
+
+This release focuses on UI layout and visual styling adjustments.
+
 ## Run
 
 Use Python 3.10 or newer on Windows.
@@ -68,5 +74,5 @@ To create a single executable:
 
 ```powershell
 python -m pip install pyinstaller
-python -m PyInstaller --noconsole --onefile --name "PiP-Monitor-v0.0.1" --icon .\assets\app_icon.ico --add-data ".\assets;assets" --version-file .\packaging\windows_version_info.txt .\pip_monitor.py
+python -m PyInstaller --noconsole --onefile --name "PiP-Monitor-v0.0.2" --icon .\assets\app_icon.ico --add-data ".\assets;assets" --version-file .\packaging\windows_version_info.txt .\pip_monitor.py
 ```
