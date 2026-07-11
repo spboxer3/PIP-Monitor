@@ -58,6 +58,12 @@ TRANSLATIONS = {
         "pause": "暫停",
         "resume": "恢復",
         "pop": "彈出",
+        "region_pip": "區域 PiP",
+        "region_select_prompt": "拖曳選取要顯示的區域；Esc 或右鍵取消",
+        "region_select_too_small": "選取範圍太小，請重新拖曳",
+        "region_window_closed": "來源視窗已關閉，無法選取區域。",
+        "region_window_minimized": "請先還原來源視窗，再選取區域。",
+        "region_window_unavailable": "無法取得來源視窗範圍。",
         "close_short": "X",
         "waiting": "等待中",
         "paused": "已暫停",
@@ -102,6 +108,12 @@ TRANSLATIONS = {
         "pause": "Pause",
         "resume": "Resume",
         "pop": "Pop",
+        "region_pip": "Region PiP",
+        "region_select_prompt": "Drag to select a region; Esc or right-click to cancel",
+        "region_select_too_small": "The selected region is too small; drag again",
+        "region_window_closed": "The source window is closed, so a region cannot be selected.",
+        "region_window_minimized": "Restore the source window before selecting a region.",
+        "region_window_unavailable": "The source window bounds are unavailable.",
         "close_short": "X",
         "waiting": "Waiting",
         "paused": "Paused",
@@ -185,6 +197,7 @@ DWM_TNP_VISIBLE = 0x00000008
 DWM_TNP_SOURCECLIENTAREAONLY = 0x00000010
 MIN_POPOUT_WIDTH = 240
 MIN_POPOUT_HEIGHT = 180
+MIN_REGION_SELECTION_SIZE = 24
 GA_ROOT = 2
 EXCLUDED_WINDOW_CLASSES = {
     "Progman",
@@ -215,6 +228,8 @@ user32.GetAncestor.argtypes = [HWND, UINT]
 user32.GetAncestor.restype = HWND
 user32.GetParent.argtypes = [HWND]
 user32.GetParent.restype = HWND
+user32.SetForegroundWindow.argtypes = [HWND]
+user32.SetForegroundWindow.restype = BOOL
 user32.GetClassNameW.argtypes = [HWND, wintypes.LPWSTR, ctypes.c_int]
 user32.GetClassNameW.restype = ctypes.c_int
 
@@ -300,6 +315,65 @@ class WindowInfo:
     def short_title(self) -> str:
         value = self.title.strip()
         return value if len(value) <= 80 else value[:77] + "..."
+
+
+@dataclass(frozen=True)
+class NormalizedCrop:
+    left: float
+    top: float
+    right: float
+    bottom: float
+
+    def __post_init__(self) -> None:
+        if not (
+            0.0 <= self.left < self.right <= 1.0
+            and 0.0 <= self.top < self.bottom <= 1.0
+        ):
+            raise ValueError("Crop coordinates must define a normalized rectangle.")
+
+    @classmethod
+    def from_points(
+        cls,
+        start: tuple[int, int],
+        end: tuple[int, int],
+        width: int,
+        height: int,
+    ) -> "NormalizedCrop":
+        safe_width = max(1, int(width))
+        safe_height = max(1, int(height))
+        x1, x2 = sorted(
+            (
+                max(0, min(safe_width, start[0])),
+                max(0, min(safe_width, end[0])),
+            )
+        )
+        y1, y2 = sorted(
+            (
+                max(0, min(safe_height, start[1])),
+                max(0, min(safe_height, end[1])),
+            )
+        )
+        if x1 == x2 or y1 == y2:
+            raise ValueError("Crop selection must have a positive size.")
+        return cls(
+            left=x1 / safe_width,
+            top=y1 / safe_height,
+            right=x2 / safe_width,
+            bottom=y2 / safe_height,
+        )
+
+    def source_rect(self, width: int, height: int) -> tuple[int, int, int, int]:
+        safe_width = max(1, int(width))
+        safe_height = max(1, int(height))
+        left = max(0, min(safe_width - 1, round(self.left * safe_width)))
+        top = max(0, min(safe_height - 1, round(self.top * safe_height)))
+        right = max(left + 1, min(safe_width, round(self.right * safe_width)))
+        bottom = max(top + 1, min(safe_height, round(self.bottom * safe_height)))
+        return (left, top, right, bottom)
+
+    def pixel_size(self, width: int, height: int) -> tuple[int, int]:
+        left, top, right, bottom = self.source_rect(width, height)
+        return (right - left, bottom - top)
 
 
 def set_dpi_awareness() -> None:
@@ -627,10 +701,19 @@ def is_valid_window(hwnd: int) -> bool:
 
 
 class PopoutWindow:
-    def __init__(self, app: "PiPApp", tile: "PiPTile") -> None:
+    def __init__(
+        self,
+        app: "PiPApp",
+        tile: "PiPTile",
+        *,
+        source_crop: NormalizedCrop | None = None,
+        owner_attribute: str = "popout",
+    ) -> None:
         self.app = app
         self.tile = tile
         self.info = tile.info
+        self.source_crop = source_crop
+        self.owner_attribute = owner_attribute
         self.after_id: str | None = None
         self.right_click_close_id: str | None = None
         self.closed = False
@@ -640,6 +723,14 @@ class PopoutWindow:
         left, top, right, bottom = self.info.rect
         source_width = max(1, right - left)
         source_height = max(1, bottom - top)
+        if source_crop is not None:
+            left, top, right, bottom = get_extended_window_rect(self.info.hwnd)
+            source_width = max(1, right - left)
+            source_height = max(1, bottom - top)
+            source_width, source_height = source_crop.pixel_size(
+                source_width,
+                source_height,
+            )
         self.aspect_ratio = source_width / source_height
         self.thumbnail: DwmGpuThumbnail | None = None
 
@@ -648,6 +739,7 @@ class PopoutWindow:
         self.window.minsize(MIN_POPOUT_WIDTH, MIN_POPOUT_HEIGHT)
         initial_width = 520
         initial_height = max(MIN_POPOUT_HEIGHT, round(initial_width / self.aspect_ratio))
+        initial_width = max(MIN_POPOUT_WIDTH, round(initial_height * self.aspect_ratio))
         self.window.geometry(f"{initial_width}x{initial_height}")
         self.window.attributes("-topmost", True)
         self.window.protocol("WM_DELETE_WINDOW", self.close)
@@ -824,7 +916,9 @@ class PopoutWindow:
         if self.thumbnail is not None:
             self.thumbnail.unregister()
             self.thumbnail = None
-        self.tile.popout = None
+        owner_attribute = getattr(self, "owner_attribute", "popout")
+        if getattr(self.tile, owner_attribute, None) is self:
+            setattr(self.tile, owner_attribute, None)
         self.window.destroy()
 
     def schedule_next(self, delay_ms: int | None = None) -> None:
@@ -851,8 +945,161 @@ class PopoutWindow:
         visible = bool(self.app.global_running.get()) and user32.IsWindow(self.info.hwnd)
         width = max(1, self.window.winfo_width())
         height = max(1, self.window.winfo_height())
-        self.ensure_thumbnail().update((0, 0, width, height), visible=visible)
+        thumbnail = self.ensure_thumbnail()
+        source_rect = None
+        if self.source_crop is not None:
+            source_rect = self.source_crop.source_rect(*thumbnail.source_size())
+        thumbnail.update(
+            (0, 0, width, height),
+            source_rect=source_rect,
+            visible=visible,
+        )
         self.schedule_next()
+
+
+class RegionSelector:
+    def __init__(self, app: "PiPApp", tile: "PiPTile") -> None:
+        self.app = app
+        self.tile = tile
+        self.info = tile.info
+        self.closed = False
+        self.start_point: tuple[int, int] | None = None
+        self.selection_id: int | None = None
+        self.previous_root_topmost = bool(app.topmost.get())
+
+        left, top, right, bottom = get_extended_window_rect(self.info.hwnd)
+        self.width = max(0, right - left)
+        self.height = max(0, bottom - top)
+        if self.width <= 0 or self.height <= 0:
+            raise ValueError(app.tr("region_window_unavailable"))
+
+        if self.previous_root_topmost:
+            app.root.attributes("-topmost", False)
+        user32.SetForegroundWindow(self.info.hwnd)
+
+        self.window = tk.Toplevel(app.root)
+        self.window.overrideredirect(True)
+        self.window.geometry(
+            f"{self.width}x{self.height}{left:+d}{top:+d}"
+        )
+        self.window.attributes("-topmost", True)
+        self.window.attributes("-alpha", 0.34)
+        self.window.configure(bg=COLOR_ACCENT_DEEP)
+        self.window.protocol("WM_DELETE_WINDOW", self.cancel)
+
+        self.canvas = tk.Canvas(
+            self.window,
+            bg=COLOR_ACCENT_DEEP,
+            bd=0,
+            highlightthickness=0,
+            cursor="crosshair",
+        )
+        self.canvas.pack(fill="both", expand=True)
+        self.prompt_id = self.canvas.create_text(
+            self.width // 2,
+            28,
+            text=app.tr("region_select_prompt"),
+            fill="white",
+            font=("Segoe UI", 12, "bold"),
+            anchor="n",
+        )
+        self.canvas.bind("<ButtonPress-1>", self.begin_selection)
+        self.canvas.bind("<B1-Motion>", self.update_selection)
+        self.canvas.bind("<ButtonRelease-1>", self.finish_selection)
+        self.canvas.bind("<Button-3>", self.cancel)
+        self.window.bind("<Escape>", self.cancel)
+        self.window.bind("<FocusOut>", self.keep_active, add="+")
+        self.window.lift()
+        self.window.focus_force()
+        self.window.grab_set()
+
+    def clamp_point(self, x: int, y: int) -> tuple[int, int]:
+        return (
+            max(0, min(self.width, int(x))),
+            max(0, min(self.height, int(y))),
+        )
+
+    def begin_selection(self, event: tk.Event) -> str:
+        self.start_point = self.clamp_point(event.x, event.y)
+        if self.selection_id is not None:
+            self.canvas.delete(self.selection_id)
+        x, y = self.start_point
+        self.selection_id = self.canvas.create_rectangle(
+            x,
+            y,
+            x,
+            y,
+            outline="white",
+            width=4,
+        )
+        self.canvas.itemconfigure(
+            self.prompt_id,
+            text=self.app.tr("region_select_prompt"),
+        )
+        return "break"
+
+    def update_selection(self, event: tk.Event) -> str:
+        if self.start_point is None or self.selection_id is None:
+            return "break"
+        x, y = self.clamp_point(event.x, event.y)
+        self.canvas.coords(
+            self.selection_id,
+            self.start_point[0],
+            self.start_point[1],
+            x,
+            y,
+        )
+        return "break"
+
+    def finish_selection(self, event: tk.Event) -> str:
+        if self.start_point is None:
+            return "break"
+        end_point = self.clamp_point(event.x, event.y)
+        selection_width = abs(end_point[0] - self.start_point[0])
+        selection_height = abs(end_point[1] - self.start_point[1])
+        if (
+            selection_width < MIN_REGION_SELECTION_SIZE
+            or selection_height < MIN_REGION_SELECTION_SIZE
+        ):
+            self.start_point = None
+            self.canvas.itemconfigure(
+                self.prompt_id,
+                text=self.app.tr("region_select_too_small"),
+            )
+            return "break"
+
+        crop = NormalizedCrop.from_points(
+            self.start_point,
+            end_point,
+            self.width,
+            self.height,
+        )
+        self.close()
+        self.app.root.after_idle(lambda: self.tile.open_region_popout(crop))
+        return "break"
+
+    def keep_active(self, _: tk.Event) -> None:
+        if not self.closed:
+            self.window.after_idle(self.window.focus_force)
+
+    def cancel(self, _: tk.Event | None = None) -> str:
+        self.close()
+        return "break"
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        if getattr(self.app, "active_region_selector", None) is self:
+            self.app.active_region_selector = None
+        if self.tile.region_selector is self:
+            self.tile.region_selector = None
+        try:
+            self.window.grab_release()
+        except tk.TclError:
+            pass
+        self.window.destroy()
+        self.app.root.attributes("-topmost", self.previous_root_topmost)
 
 
 class PiPTile:
@@ -873,6 +1120,8 @@ class PiPTile:
         self.running = True
         self.closed = False
         self.popout: PopoutWindow | None = None
+        self.region_popout: PopoutWindow | None = None
+        self.region_selector: RegionSelector | None = None
         self.thumbnail: DwmGpuThumbnail | None = None
         self.status_key: str | None = "waiting"
         self.status_kwargs: dict[str, object] = {}
@@ -956,13 +1205,27 @@ class PiPTile:
         )
         self.image_label.grid(row=2, column=0, sticky="nsew")
 
+        footer = ttk.Frame(content, style="Card.TFrame")
+        footer.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        footer.columnconfigure(0, weight=1)
+
         self.status_label = ttk.Label(
-            content,
+            footer,
             text=app.tr("waiting"),
             anchor="w",
             style="Muted.TLabel",
         )
-        self.status_label.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        self.status_label.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.region_button = RoundedButton(
+            footer,
+            text=app.tr("region_pip"),
+            width=92,
+            height=30,
+            bg=COLOR_PANEL,
+            radius=7,
+            command=self.open_region_selector,
+        )
+        self.region_button.grid(row=0, column=1, sticky="e")
 
         content.columnconfigure(0, weight=1)
         content.rowconfigure(2, weight=1)
@@ -990,6 +1253,7 @@ class PiPTile:
             text=self.app.tr("pause") if self.running else self.app.tr("resume")
         )
         self.pop_button.configure(text=self.app.tr("pop"))
+        self.region_button.configure(text=self.app.tr("region_pip"))
         self.close_button.configure(text=self.app.tr("close_short"))
         if self.status_raw is not None:
             self.status_label.configure(text=self.status_raw)
@@ -1020,6 +1284,46 @@ class PiPTile:
             return
         self.popout = PopoutWindow(self.app, self)
 
+    def open_region_selector(self) -> None:
+        if self.region_popout and not self.region_popout.closed:
+            self.region_popout.window.lift()
+            self.region_popout.window.focus_force()
+            return
+        if not is_valid_window(self.info.hwnd):
+            messagebox.showerror(
+                APP_TITLE,
+                self.app.tr("region_window_closed"),
+                parent=self.app.root,
+            )
+            return
+        if user32.IsIconic(self.info.hwnd):
+            messagebox.showinfo(
+                APP_TITLE,
+                self.app.tr("region_window_minimized"),
+                parent=self.app.root,
+            )
+            return
+        active_selector = getattr(self.app, "active_region_selector", None)
+        if active_selector is not None and not active_selector.closed:
+            active_selector.cancel()
+        try:
+            self.region_selector = RegionSelector(self.app, self)
+        except (tk.TclError, ValueError) as exc:
+            self.region_selector = None
+            messagebox.showerror(APP_TITLE, str(exc), parent=self.app.root)
+            return
+        self.app.active_region_selector = self.region_selector
+
+    def open_region_popout(self, crop: NormalizedCrop) -> None:
+        if self.closed:
+            return
+        self.region_popout = PopoutWindow(
+            self.app,
+            self,
+            source_crop=crop,
+            owner_attribute="region_popout",
+        )
+
     def remove(self) -> None:
         self.app.remove_tile(self.info.hwnd)
 
@@ -1032,6 +1336,10 @@ class PiPTile:
                 pass
         if self.popout and not self.popout.closed:
             self.popout.close()
+        if self.region_selector and not self.region_selector.closed:
+            self.region_selector.cancel()
+        if self.region_popout and not self.region_popout.closed:
+            self.region_popout.close()
         if self.thumbnail is not None:
             self.thumbnail.unregister()
             self.thumbnail = None
@@ -1783,6 +2091,7 @@ class PiPApp:
         self.all_windows: list[WindowInfo] = []
         self.tiles: dict[int, PiPTile] = {}
         self.wall_tiles: dict[int, PiPTile] = {}
+        self.active_region_selector: RegionSelector | None = None
         self.language = tk.StringVar(value=DEFAULT_LANGUAGE)
         self.active_nav = "process_discovery"
         self.global_running = tk.BooleanVar(value=True)
@@ -2013,6 +2322,8 @@ class PiPApp:
             slider.refresh_language()
 
         for tile in self.tiles.values():
+            tile.apply_language()
+        for tile in self.wall_tiles.values():
             tile.apply_language()
 
     def page_for_nav(self, nav_id: str) -> str:

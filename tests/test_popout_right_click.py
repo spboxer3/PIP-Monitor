@@ -102,6 +102,18 @@ class PopoutRightClickTests(unittest.TestCase):
         self.assertEqual(popout.window.cancelled, ["idle-1"])
         self.assertEqual(popout.window.destroy_count, 1)
 
+    def test_region_close_does_not_clear_full_popout(self) -> None:
+        popout = self.make_popout()
+        full_popout = object()
+        popout.owner_attribute = "region_popout"
+        popout.tile.popout = full_popout
+        popout.tile.region_popout = popout
+
+        popout.close()
+
+        self.assertIs(popout.tile.popout, full_popout)
+        self.assertIsNone(popout.tile.region_popout)
+
 
 if __name__ == "__main__":
     unittest.main()

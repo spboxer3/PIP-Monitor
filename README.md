@@ -14,6 +14,8 @@ Current version: `v0.0.2`
 - Use the dedicated Monitor page for a larger dashboard view.
 - Pause, resume, pop out, or remove individual previews.
 - Open borderless, always-on-top pop-outs that preserve the source aspect ratio.
+- Select a region inside one source window and open it as a separate cropped
+  PiP without changing the existing full-window preview or pop-out.
 - Adjust the global refresh target from 1 to 120 FPS and the tile width from
   220 to 720 pixels. The default refresh target is 60 FPS.
 - Pause or resume all previews and keep the main dashboard always on top.
@@ -55,6 +57,9 @@ python -m pip install -r .\requirements.txt
    filter the list, then choose **Add selected**. Double-clicking a row also
    adds it.
 2. Use **Pause**, **Pop**, or **X** on a preview tile to control that window.
+   **Region PiP** is an additional action that opens a live crop from inside the
+   selected source window; the original **Pop** action still opens the complete
+   window.
 3. Open **Monitor** from the sidebar for the full dashboard view.
 4. Use the bottom control bar to change FPS, tile width, dashboard always-on-top
    behavior, or the global paused state.
@@ -65,6 +70,16 @@ Pop-out controls:
 - Drag an edge or corner with the left mouse button to resize it while
   preserving the source aspect ratio.
 - Right-click the picture or press `Esc` to close the pop-out.
+
+Region PiP controls:
+
+- Choose **Region PiP** on a preview tile, then drag over the desired part of
+  the source window.
+- Press `Esc` or right-click during selection to cancel without opening a PiP.
+- Close an existing cropped PiP before choosing a different region from the
+  same preview tile.
+- Crops are stored proportionally, so the selected area follows later source
+  window resizing.
 
 ## Rendering backend
 
@@ -95,8 +110,8 @@ Run the unit tests from the project root:
 python -m unittest discover -s .\tests -v
 ```
 
-The current test suite covers the pop-out right-click close behavior, including
-deferred close handling and repeated-close safety.
+The current test suite covers pop-out close safety and normalized region-crop
+geometry.
 
 ## Build a portable executable
 
