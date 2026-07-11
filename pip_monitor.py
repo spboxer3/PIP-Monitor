@@ -632,6 +632,7 @@ class PopoutWindow:
         self.tile = tile
         self.info = tile.info
         self.after_id: str | None = None
+        self.right_click_close_id: str | None = None
         self.closed = False
         self.move_offset: tuple[int, int] | None = None
         self.resize_origin: tuple[int, int, int, int, int, int, str] | None = None
@@ -666,7 +667,22 @@ class PopoutWindow:
         widget.bind("<ButtonPress-1>", self.start_pointer_action, add="+")
         widget.bind("<B1-Motion>", self.drag_pointer, add="+")
         widget.bind("<ButtonRelease-1>", self.stop_pointer_action, add="+")
-        widget.bind("<Button-3>", lambda _: self.close(), add="+")
+        widget.bind("<ButtonPress-3>", self.consume_right_click, add="+")
+        widget.bind("<ButtonRelease-3>", self.request_right_click_close, add="+")
+
+    def consume_right_click(self, _: tk.Event) -> str:
+        return "break"
+
+    def request_right_click_close(self, _: tk.Event) -> str:
+        if not self.closed and self.right_click_close_id is None:
+            self.right_click_close_id = self.window.after_idle(
+                self.finish_right_click_close
+            )
+        return "break"
+
+    def finish_right_click_close(self) -> None:
+        self.right_click_close_id = None
+        self.close()
 
     def get_resize_region(self, event: tk.Event) -> str:
         width = max(1, self.window.winfo_width())
@@ -791,7 +807,15 @@ class PopoutWindow:
         self.update_thumbnail()
 
     def close(self) -> None:
+        if self.closed:
+            return
         self.closed = True
+        if self.right_click_close_id:
+            try:
+                self.window.after_cancel(self.right_click_close_id)
+            except tk.TclError:
+                pass
+            self.right_click_close_id = None
         if self.after_id:
             try:
                 self.app.root.after_cancel(self.after_id)
