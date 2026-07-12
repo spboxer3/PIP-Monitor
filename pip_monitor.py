@@ -182,6 +182,15 @@ class SIZE(ctypes.Structure):
     ]
 
 
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", DWORD),
+        ("rcMonitor", wintypes.RECT),
+        ("rcWork", wintypes.RECT),
+        ("dwFlags", DWORD),
+    ]
+
+
 WNDENUMPROC = ctypes.WINFUNCTYPE(BOOL, HWND, wintypes.LPARAM)
 
 
@@ -199,6 +208,8 @@ MIN_POPOUT_WIDTH = 240
 MIN_POPOUT_HEIGHT = 180
 MIN_REGION_SELECTION_SIZE = 24
 GA_ROOT = 2
+MONITOR_DEFAULTTONULL = 0x00000000
+MONITOR_DEFAULTTONEAREST = 0x00000002
 EXCLUDED_WINDOW_CLASSES = {
     "Progman",
     "WorkerW",
@@ -230,6 +241,12 @@ user32.GetParent.argtypes = [HWND]
 user32.GetParent.restype = HWND
 user32.SetForegroundWindow.argtypes = [HWND]
 user32.SetForegroundWindow.restype = BOOL
+user32.MonitorFromWindow.argtypes = [HWND, DWORD]
+user32.MonitorFromWindow.restype = HANDLE
+user32.MonitorFromRect.argtypes = [ctypes.POINTER(wintypes.RECT), DWORD]
+user32.MonitorFromRect.restype = HANDLE
+user32.GetMonitorInfoW.argtypes = [HANDLE, ctypes.POINTER(MONITORINFO)]
+user32.GetMonitorInfoW.restype = BOOL
 user32.GetClassNameW.argtypes = [HWND, wintypes.LPWSTR, ctypes.c_int]
 user32.GetClassNameW.restype = ctypes.c_int
 
@@ -476,6 +493,69 @@ def make_rect(left: int, top: int, right: int, bottom: int) -> wintypes.RECT:
     return wintypes.RECT(int(left), int(top), int(right), int(bottom))
 
 
+def monitor_bounds(
+    monitor: int,
+    *,
+    work_area: bool = False,
+) -> tuple[int, int, int, int]:
+    info = MONITORINFO()
+    info.cbSize = ctypes.sizeof(info)
+    if not monitor or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+        raise OSError("Could not query monitor bounds.")
+    rect = info.rcWork if work_area else info.rcMonitor
+    return (int(rect.left), int(rect.top), int(rect.right), int(rect.bottom))
+
+
+def get_monitor_rect_for_window(hwnd: int) -> tuple[int, int, int, int]:
+    monitor = user32.MonitorFromWindow(
+        get_root_hwnd(hwnd),
+        MONITOR_DEFAULTTONEAREST,
+    )
+    return monitor_bounds(monitor)
+
+
+def ensure_rect_on_available_monitor(
+    rect: tuple[int, int, int, int],
+) -> tuple[int, int, int, int]:
+    native_rect = make_rect(*rect)
+    monitor = user32.MonitorFromRect(
+        ctypes.byref(native_rect),
+        MONITOR_DEFAULTTONULL,
+    )
+    if monitor:
+        return rect
+
+    monitor = user32.MonitorFromRect(
+        ctypes.byref(native_rect),
+        MONITOR_DEFAULTTONEAREST,
+    )
+    left, top, right, bottom = monitor_bounds(monitor, work_area=True)
+    width = min(max(1, rect[2] - rect[0]), max(1, right - left))
+    height = min(max(1, rect[3] - rect[1]), max(1, bottom - top))
+    x = max(left, min(rect[0], right - width))
+    y = max(top, min(rect[1], bottom - height))
+    return (x, y, x + width, y + height)
+
+
+def aspect_fit_destination(
+    width: int,
+    height: int,
+    aspect_ratio: float,
+) -> tuple[int, int, int, int]:
+    safe_width = max(1, int(width))
+    safe_height = max(1, int(height))
+    safe_aspect = max(0.0001, float(aspect_ratio))
+    if safe_width / safe_height > safe_aspect:
+        content_height = safe_height
+        content_width = max(1, round(content_height * safe_aspect))
+    else:
+        content_width = safe_width
+        content_height = max(1, round(content_width / safe_aspect))
+    left = (safe_width - content_width) // 2
+    top = (safe_height - content_height) // 2
+    return (left, top, left + content_width, top + content_height)
+
+
 def rect_intersection(
     first: tuple[int, int, int, int],
     second: tuple[int, int, int, int],
@@ -715,8 +795,11 @@ class PopoutWindow:
         self.source_crop = source_crop
         self.owner_attribute = owner_attribute
         self.after_id: str | None = None
-        self.right_click_close_id: str | None = None
+        self.middle_click_close_id: str | None = None
+        self.right_click_toggle_id: str | None = None
         self.closed = False
+        self.fullscreen = False
+        self.restore_geometry: tuple[int, int, int, int] | None = None
         self.move_offset: tuple[int, int] | None = None
         self.resize_origin: tuple[int, int, int, int, int, int, str] | None = None
         self.resize_margin = 18
@@ -759,24 +842,82 @@ class PopoutWindow:
         widget.bind("<ButtonPress-1>", self.start_pointer_action, add="+")
         widget.bind("<B1-Motion>", self.drag_pointer, add="+")
         widget.bind("<ButtonRelease-1>", self.stop_pointer_action, add="+")
+        widget.bind("<ButtonPress-2>", self.request_middle_click_close, add="+")
         widget.bind("<ButtonPress-3>", self.consume_right_click, add="+")
-        widget.bind("<ButtonRelease-3>", self.request_right_click_close, add="+")
+        widget.bind("<ButtonRelease-3>", self.request_right_click_toggle, add="+")
 
     def consume_right_click(self, _: tk.Event) -> str:
         return "break"
 
-    def request_right_click_close(self, _: tk.Event) -> str:
-        if not self.closed and self.right_click_close_id is None:
-            self.right_click_close_id = self.window.after_idle(
-                self.finish_right_click_close
+    def request_right_click_toggle(self, _: tk.Event) -> str:
+        if not self.closed and self.right_click_toggle_id is None:
+            self.right_click_toggle_id = self.window.after_idle(
+                self.finish_right_click_toggle
             )
         return "break"
 
-    def finish_right_click_close(self) -> None:
-        self.right_click_close_id = None
+    def finish_right_click_toggle(self) -> None:
+        self.right_click_toggle_id = None
+        if not self.closed:
+            self.toggle_fullscreen()
+
+    def request_middle_click_close(self, _: tk.Event) -> str:
+        if not self.closed and self.middle_click_close_id is None:
+            self.middle_click_close_id = self.window.after_idle(
+                self.finish_middle_click_close
+            )
+        return "break"
+
+    def finish_middle_click_close(self) -> None:
+        self.middle_click_close_id = None
         self.close()
 
+    def toggle_fullscreen(self) -> None:
+        if self.fullscreen:
+            self.exit_fullscreen()
+        else:
+            self.enter_fullscreen()
+
+    def enter_fullscreen(self) -> None:
+        self.window.update_idletasks()
+        self.restore_geometry = (
+            self.window.winfo_x(),
+            self.window.winfo_y(),
+            self.window.winfo_width(),
+            self.window.winfo_height(),
+        )
+        left, top, right, bottom = get_monitor_rect_for_window(
+            self.window.winfo_id()
+        )
+        self.fullscreen = True
+        self.move_offset = None
+        self.resize_origin = None
+        self.window.configure(cursor="arrow")
+        self.image_label.configure(cursor="arrow")
+        self.window.geometry(
+            f"{right - left}x{bottom - top}{left:+d}{top:+d}"
+        )
+        self.window.lift()
+        self.update_thumbnail()
+
+    def exit_fullscreen(self) -> None:
+        restore_geometry = self.restore_geometry
+        self.fullscreen = False
+        self.restore_geometry = None
+        if restore_geometry is None:
+            return
+        x, y, width, height = restore_geometry
+        left, top, right, bottom = ensure_rect_on_available_monitor(
+            (x, y, x + width, y + height)
+        )
+        self.window.geometry(
+            f"{right - left}x{bottom - top}{left:+d}{top:+d}"
+        )
+        self.update_thumbnail()
+
     def get_resize_region(self, event: tk.Event) -> str:
+        if self.fullscreen:
+            return ""
         width = max(1, self.window.winfo_width())
         height = max(1, self.window.winfo_height())
         local_x = int(event.x_root) - self.window.winfo_rootx()
@@ -816,16 +957,21 @@ class PopoutWindow:
         return "fleur"
 
     def update_cursor(self, event: tk.Event) -> None:
-        cursor = self.resize_cursor(self.get_resize_region(event))
+        cursor = "arrow" if self.fullscreen else self.resize_cursor(
+            self.get_resize_region(event)
+        )
         self.window.configure(cursor=cursor)
         self.image_label.configure(cursor=cursor)
 
-    def start_pointer_action(self, event: tk.Event) -> None:
+    def start_pointer_action(self, event: tk.Event) -> str | None:
+        if self.fullscreen:
+            return "break"
         region = self.get_resize_region(event)
         if region:
             self.start_resize(event, region)
         else:
             self.start_move(event)
+        return None
 
     def start_move(self, event: tk.Event) -> None:
         self.resize_origin = None
@@ -834,11 +980,14 @@ class PopoutWindow:
             int(event.y_root) - self.window.winfo_y(),
         )
 
-    def drag_pointer(self, event: tk.Event) -> None:
+    def drag_pointer(self, event: tk.Event) -> str | None:
+        if self.fullscreen:
+            return "break"
         if self.resize_origin is not None:
             self.resize_window(event)
         else:
             self.move_window(event)
+        return None
 
     def move_window(self, event: tk.Event) -> None:
         if self.move_offset is None:
@@ -893,21 +1042,30 @@ class PopoutWindow:
         self.window.geometry(f"{width}x{height}+{x}+{y}")
         self.update_thumbnail()
 
-    def stop_pointer_action(self, _: tk.Event) -> None:
+    def stop_pointer_action(self, _: tk.Event) -> str | None:
         self.move_offset = None
         self.resize_origin = None
+        if self.fullscreen:
+            return "break"
         self.update_thumbnail()
+        return None
 
     def close(self) -> None:
         if self.closed:
             return
         self.closed = True
-        if self.right_click_close_id:
+        if self.right_click_toggle_id:
             try:
-                self.window.after_cancel(self.right_click_close_id)
+                self.window.after_cancel(self.right_click_toggle_id)
             except tk.TclError:
                 pass
-            self.right_click_close_id = None
+            self.right_click_toggle_id = None
+        if self.middle_click_close_id:
+            try:
+                self.window.after_cancel(self.middle_click_close_id)
+            except tk.TclError:
+                pass
+            self.middle_click_close_id = None
         if self.after_id:
             try:
                 self.app.root.after_cancel(self.after_id)
@@ -945,12 +1103,19 @@ class PopoutWindow:
         visible = bool(self.app.global_running.get()) and user32.IsWindow(self.info.hwnd)
         width = max(1, self.window.winfo_width())
         height = max(1, self.window.winfo_height())
+        destination_rect = (0, 0, width, height)
+        if self.fullscreen:
+            destination_rect = aspect_fit_destination(
+                width,
+                height,
+                self.aspect_ratio,
+            )
         thumbnail = self.ensure_thumbnail()
         source_rect = None
         if self.source_crop is not None:
             source_rect = self.source_crop.source_rect(*thumbnail.source_size())
         thumbnail.update(
-            (0, 0, width, height),
+            destination_rect,
             source_rect=source_rect,
             visible=visible,
         )

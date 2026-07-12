@@ -5,7 +5,7 @@ windows from one picture-in-picture dashboard. It uses the Windows Desktop
 Window Manager (DWM) compositor, so live previews are rendered by Windows
 instead of being copied through a CPU-based screen-capture pipeline.
 
-Current version: `v0.0.2`
+Current version: `v0.0.4`
 
 ## Highlights
 
@@ -14,6 +14,9 @@ Current version: `v0.0.2`
 - Use the dedicated Monitor page for a larger dashboard view.
 - Pause, resume, pop out, or remove individual previews.
 - Open borderless, always-on-top pop-outs that preserve the source aspect ratio.
+- Right-click a pop-out to toggle full-screen mode on the monitor that currently
+  contains most of the PiP, including monitors with different sizes or aspect
+  ratios.
 - Select a region inside one source window and open it as a separate cropped
   PiP without changing the existing full-window preview or pop-out.
 - Adjust the global refresh target from 1 to 120 FPS and the tile width from
@@ -69,7 +72,14 @@ Pop-out controls:
 - Drag anywhere inside the picture with the left mouse button to move it.
 - Drag an edge or corner with the left mouse button to resize it while
   preserving the source aspect ratio.
-- Right-click the picture or press `Esc` to close the pop-out.
+- Press the middle mouse button or press `Esc` to close the pop-out.
+- Right-click to expand the PiP to the full bounds of its current monitor;
+  right-click again to restore its exact previous position and size. Both the
+  press and release are consumed so the click does not pass through to the
+  application or desktop behind the PiP.
+- Full-screen mode preserves the source or crop aspect ratio with black bars
+  when the monitor has a different shape. Moving and resizing are temporarily
+  disabled until the PiP is restored.
 
 Region PiP controls:
 
@@ -110,8 +120,9 @@ Run the unit tests from the project root:
 python -m unittest discover -s .\tests -v
 ```
 
-The current test suite covers pop-out close safety and normalized region-crop
-geometry.
+The current test suite covers middle-click close safety, consumed right-click
+events, full-screen toggle and restore geometry, aspect-ratio fitting on
+different monitor shapes, and normalized region-crop geometry.
 
 ## Build a portable executable
 
@@ -119,7 +130,8 @@ Install PyInstaller, then create a single-file Windows executable:
 
 ```powershell
 python -m pip install pyinstaller
-python -m PyInstaller --noconsole --onefile --name "PiP-Monitor-v0.0.2" --icon .\assets\app_icon.ico --add-data ".\assets;assets" --version-file .\packaging\windows_version_info.txt .\pip_monitor.py
+python -m PyInstaller --noconfirm --noconsole --onefile --name "PiP-Monitor-v0.0.4" --icon .\assets\app_icon.ico --add-data ".\assets;assets" --version-file .\packaging\windows_version_info.txt --distpath .\release\exe --workpath .\build\pyinstaller\v0.0.4 .\pip_monitor.py
+Compress-Archive -LiteralPath .\release\exe\PiP-Monitor-v0.0.4.exe -DestinationPath .\release\PiP-Monitor-v0.0.4-portable-win64.zip -CompressionLevel Optimal
 ```
 
 App icons are stored under `assets/`. The main window uses

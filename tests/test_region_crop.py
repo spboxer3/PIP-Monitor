@@ -62,6 +62,7 @@ class NormalizedCropTests(unittest.TestCase):
         thumbnail = FakeThumbnail()
         popout = PopoutWindow.__new__(PopoutWindow)
         popout.closed = False
+        popout.fullscreen = False
         popout.source_crop = crop
         popout.info = SimpleNamespace(hwnd=0)
         popout.app = SimpleNamespace(
